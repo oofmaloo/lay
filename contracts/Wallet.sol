@@ -1,170 +1,149 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.9;
+pragma solidity 0.8.10;
+
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Address} from "@openzeppelin/contracts/utils/Address.sol";
+import {IRoutersHub} from "./interfaces/IRoutersHub.sol";
 
 // Uncomment this line to use console.log
-// import "hardhat/console.sol";
+import "hardhat/console.sol";
 
-contract Core is Owner {
-    address payable public owner;
+contract Wallet is Ownable {
 
-    /**
-    * @dev If to send any payments to aave directly.  For example, if someone pays someone $10 for lunch, it goes into Aave automatically
-    **/
-    uint256 public autoEarn;
+  event TransactionCreated(
+    uint256 transactionId,
+    address[] targets,
+    uint256[] values,
+    string[] signatures,
+    bytes[] calldatas,
+    string description
+  );
 
-    /**
-    * @dev The default place to send to earn, such as Aave
-    **/
-    address public defaultEarner;
+  event HookCreated(
+    uint256 transactionId,
+    address[] targets,
+    uint256[] values,
+    string[] signatures,
+    bytes[] calldatas,
+    string description
+  );
 
-    /**
-    * @dev List of earning protocols like Yearn and Aave
-    **/
-    struct RouterData {
-        uint8 id;
-        address router; // router contract address
-        bool hasBalance;
-        bool exists; // if initiated
-        bool active; // can be used
-    }
+  event Deposit(address indexed sender, uint value);
 
-    uint256 internal routersCount;
-    mapping(uint256 => address) internal routersList;
-    mapping(address => RouterData) internal routers;
+  /// @dev Gives wallet owner ability to call any function
+  /// Otherwise wallet can only call whitelisted encoder contracts
+  bool public advancedMode;
 
+  constructor(address owner) {
+    transferOwnership(owner);
+  }
 
-    struct Payments {
-        address token;
-        uint256 amount;
-        string description;
-        uint256 when;
-        address from;
-        bool earned;
-        address earner;
-    }
+  /// @dev Fallback function allows to deposit ether.
+  // function()
+  //   payable
+  // {
+  //   if (msg.value > 0)
+  //     Deposit(msg.sender, msg.value);
+  // }
 
-    /**
-    * @dev List of payments to wallet
-    **/
-    uint256 internal lensPaysCount;
-    // mapping(uint256 => address) internal lensPaysList;
-    mapping(uint256 => Payments) internal lensPays;
+  receive() external payable  { 
+    if (msg.value > 0)
+      emit Deposit(msg.sender, msg.value);
 
-    /**
-    * @dev List of do-not-accept tokens
-    **/
-    mapping(address => bool) internal blacklistAssets;
+  }
 
-    constructor(address[] memory routers, address defaultEarner, bool autoEarn_) payable {
-        autoEarn = autoEarn_;
-        owner = payable(msg.sender);
-    }
+  fallback() external payable {
+    if (msg.value > 0)
+      emit Deposit(msg.sender, msg.value);
 
-    function deposit(address token, uint256 amount, string description) public {
-        require(token != address(0), "You aren't the owner");
-        require(amount != 0, "You aren't the owner");
-        require(!blacklistAssets[token], "I don't want this shitcoin!");
+  }
 
-        // _beforeDeposit();
-        IERC20(token).safeTransferFrom(msg.sender,  address(this), amount);
+  function hashTransaction(
+      address[] memory targets,
+      uint256[] memory values,
+      bytes[] memory calldatas,
+      bytes32 descriptionHash
+  ) public pure virtual returns (uint256) {
+      return uint256(keccak256(abi.encode(targets, values, calldatas, descriptionHash)));
+  }
 
-        if (autoEarn && defaultEarner != address(0)) {
-            _earn(defaultEarner, token, amount);
-        } else {
-            // something else or nothing else
-        }
+  function execute(
+    address[] memory targets,
+    uint256[] memory values,
+    bytes[] memory calldatas,
+    string memory description
+  ) public onlyOwner payable returns (uint256) {
+    // if (!advancedMode) {
+    //   for (uint256 i = 0; i < targets.length; ++i) {
+    //     require(IRoutersHub(_provider.getRoutersHub()).isWhitelisted(targets[i]), 
+    //       "Turn on advanced mode to call non whitelisted encoders"
+    //     );
+    //   }
+    // }
+    console.log("execute");
+    uint256 transactionId = hashTransaction(targets, values, calldatas, keccak256(bytes(description)));
 
-        // _afterDeposit();
+    // FunctionCallState status = state(transactionId);
 
+    // _functionCalls[transactionId].executed = true;
 
-        Payments storage payment = lensPays[lensPaysCount];
-        payment.token = token;
-        payment.amount = amount;
-        payment.description = description;
-        payment.when = block.timestamp;
-        payment.from = msg.sender;
-        payment.earned = autoEarn && defaultEarner != address(0);
-        payment.earner = autoEarn && defaultEarner != address(0) ? defaultEarner : address(0);
-        lensPaysCount++;
+    _execute(transactionId, targets, values, calldatas, keccak256(bytes(description)));
 
-        // emit Deposit();
-    }
+    emit TransactionCreated(
+      transactionId,
+      targets,
+      values,
+      new string[](targets.length),
+      calldatas,
+      description
+    );
 
-    function redeem(address token, uint256 amount) public onlyOwner {
-        require(token != address(0), "You aren't the owner");
-        require(amount != 0, "You aren't the owner");
+    return transactionId;
+  }
 
-        // track liquidity to give users better revert messages in production
-        // uint256 liquidity = 0;
+  function executeHook(
+    address[] memory targets,
+    uint256[] memory values,
+    bytes[] memory calldatas,
+    string memory description
+  ) public payable {
+    // if (!advancedMode) {
 
-        uint256 balance = IERC20(token).balanceOf(address(this));
-        if (amount > balance) {
-            uint256 amount_ = amount;
-            for (uint256 i = 0; i < routersCount && amount_ > 0; i++) {
-                if (routersList[i] == address(0)) {
-                    continue;
-                }
-                uint256 balance = IRouter(routersList[i]).getBalance(token, address(this));
-                if (balance == 0) {
-                    continue;
-                }
-                uint256 liquidity = IRouter(routersList[i]).getLiquidity(token);
-                uint256 redeemAmount = amount_ > liquidity ? liquidity : amount_;
-                _redeemEarnings(routersList[i], token, amount)
-                amount_ = amount_ - redeemAmount;
-            }
-        }
+    // }
 
-        // trips revert if not enough was redeemed
-        _underlying.safeTransfer(msg.sender, amount);
+    // uint256 transactionId = hashTransaction(targets, values, calldatas, keccak256(bytes(description)));
 
-        // emit Redeem();
-    }
+    _execute(0, targets, values, calldatas, keccak256(bytes(description)));
 
-    /**
-    * @dev Manually add to earnings from assets within this contract
-    **/
-    function depositEarnings(address router, address token, uint256 amount) public onlyOwner {
-        uint256 balance = IERC20(token).balanceOf(address(this));
-        require(balance != 0, "Balance is zero");
-        amount = amount > balance ? balance : amount;
-        _earn(routersList[i], token, amount);
-    }
+    emit HookCreated(
+      0,
+      targets,
+      values,
+      new string[](targets.length),
+      calldatas,
+      description
+    );
+  }
 
-    /**
-    * @dev Manually redeem earnings
-    **/
-    function redeemEarnings(address router, address token, uint256 amount) public onlyOwner {
-        uint256 balance = IRouter(router).getBalance(token, address(this));
-        require(balance != 0, "Balance is zero");
-        uint256 liquidity = IRouter(router).getLiquidity(token);
-        uint256 amount = amount > liquidity ? liquidity : amount;
-        _redeemEarnings(routersList[i], token, amount);
-    }
-
-    /**
-    * @dev Set default earner.  Set to address zero for no earnings
-    **/
-    function setDefaultEarner(address router) public onlyOwner {
-        defaultEarner = router;
-    }
-
-    function setAutoEarn(bool value) public onlyOwner {
-        require(autoEarn != value, "Auto Earn set!");
-
-        autoEarn = value;
-    }
-
-    function _earn(address router, address token, uint256 amount) internal {
-        // _beforeEarn();
-        // IRouter(router).deposit(token, amount, address(this));
-        // _afterEarn();
-    }
-
-    function _redeemEarnings(address router, address token, uint256 amount) internal {
-        // _beforeRedeem();
-        // IRouter(router).redeem(token, amount, address(this));
-        // _afterRedeem();
-    }
-
+  /**
+   * @dev Internal execution mechanism. Can be overridden to implement different execution mechanism
+   */
+  function _execute(
+      uint256, /* functionCallId */
+      address[] memory targets,
+      uint256[] memory values,
+      bytes[] memory calldatas,
+      bytes32 /*descriptionHash*/
+  ) internal {
+      string memory errorMessage = "Wallet: call reverted without message";
+      for (uint256 i = 0; i < targets.length; ++i) {
+        // if (!advancedMode) {
+        //   require(IRoutersHub(_provider.getRoutersHub()).isWhitelisted(targets[i]), 
+        //     "Turn on advanced mode to call non whitelisted encoders"
+        //   );
+        // }
+        (bool success, bytes memory returndata) = targets[i].call{value: values[i]}(calldatas[i]);
+        Address.verifyCallResult(success, returndata, errorMessage);
+      }
+  }
 }
